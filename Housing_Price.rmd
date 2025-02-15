@@ -1,0 +1,314 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+#Load the library
+```{r}
+library(dplyr)
+library(labelled)
+library(rjags)
+library(sampling)
+library(knitr)
+library(kableExtra)
+```
+
+#Load the data
+```{r}
+df <- read.csv("D:\\BINUS\\DATA SCIENCE SEMESTER 3\\BAYESIAN DATA ANALYTICS\\PROJECT\\housing_price_dataset.csv")
+df
+```
+
+#Data description
+```{r}
+str(df)
+```
+
+#Count missing values
+```{r}
+null_count <- colSums(is.na(df))
+null_count
+```
+
+#Encode the categorical variable to numerical 
+```{r}
+neighborhood_levels <- c("Rural", "Suburb", "Urban")
+neighborhood_labels <- c("1", "2", "3")
+df$Neighborhood <- factor(df$Neighborhood, levels = neighborhood_levels, labels = neighborhood_labels)
+```
+
+#Encode all int type of variable to numeric
+```{r}
+df$SquareFeet <- as.numeric(df$SquareFeet)
+df$Bedrooms <- as.numeric(df$Bedrooms)
+df$Bathrooms <- as.numeric(df$Bathrooms)
+df$Neighborhood <- as.numeric(df$Neighborhood)
+df$YearBuilt <- as.numeric(df$YearBuilt)
+df$Price <- as.numeric(df$Price)
+df
+```
+
+#Use stratified sampling
+```{r}
+set.seed(123)
+df$strata <- cut(df$Price, breaks = 5)
+n_samples <- 1000
+stratified_sample <- strata(df, "strata", size = floor(n_samples * prop.table(table(df$strata))))
+sampled_indices <- as.numeric(unlist(stratified_sample))
+stratified_sampled_data <- df[sampled_indices, ]
+df <- stratified_sampled_data
+df
+```
+
+```{r}
+Y <- log(df$Price)
+X <- as.matrix(df[, c("SquareFeet", "Bedrooms", "Bathrooms", "Neighborhood", "YearBuilt")])
+```
+
+#Standardize the covariates
+```{r}
+X = scale(X)
+```
+
+#Put the data in JAGS format
+```{r}
+n <- length(Y)
+p <- ncol(X)
+data <- list(Y=Y,X=X,n=n,p=p)
+params <- c("beta")
+burn <- 5000
+n.iter <- 10000
+n.chains <- 2
+```
+
+#Fit the uninformative Gaussian model
+===========
+| MODEL 1 |
+===========
+#Define the model as a string
+```{r}
+model_string <- textConnection("model
+{
+  # Likelihood
+  for(i in 1:n)
+  {
+    Y[i]  ~ dnorm(alpha+mu[i],tau)
+    mu[i] <- inprod(X[i,],beta[]) 
+  }
+  
+  # Priors
+  for(j in 1:p)
+  {
+    beta[j] ~ dnorm(0,0.001)
+  }
+  
+  alpha ~ dnorm(0,0.001)
+  tau ~ dgamma(0.1, 0.1)
+  
+}")
+```
+
+#Load the data and compile the MCMC code
+```{r}
+model <- jags.model(model_string, data = data, n.chains = n.chains, quiet = FALSE)
+```
+
+#Burn in for 5000 samples
+```{r}
+update(model, burn)
+```
+
+#Generate 10000 post-burn-in samples
+```{r}
+samples <- coda.samples(model, variable.names=params, n.iter=n.iter)
+```
+
+#Summarize the output
+```{r}
+summary(samples)
+```
+
+#Graphical Convergence Diagnostics
+```{r}
+plot(samples)
+```
+
+#Numerical Convergence Diagnostics: Gelman-Rubin Statistics
+```{r}
+gelman.diag(samples)
+```
+PSRF = 1, means that it's perfect and indicates convergence
+
+#Effective Sample Size (ESS)
+```{r}
+effectiveSize(samples)
+```
+
+#Deviance Information Criteria (DIC)
+```{r}
+DIC1 <- dic.samples(model,n.iter=n.iter,progress.bar="none")
+DIC1
+```
+
+#Feature Selection using SSVS
+```{r}
+model_string2 <- textConnection("model
+{
+  # Likelihood
+  for(i in 1:n)
+  {
+    Y[i] ~ dnorm(alpha+inprod(X[i,],beta[]),tau)
+  }
+  
+  # Priors
+  for(j in 1:p)
+  {
+    beta[j] <- gamma[j]*delta[j] 
+    gamma[j] ~ dbern(0.5)  
+    delta[j] ~ dnorm(0,tau)
+  }
+  
+  alpha ~ dnorm(0,0.001)
+  tau ~ dgamma(0.1, 0.1)
+}")
+
+model2 <- jags.model(model_string2, data = data, n.chains = n.chains, quiet = TRUE)
+update(model2, burn)
+samples2 <- coda.samples(model2, variable.names=params, n.iter=n.iter)
+```
+
+```{r}
+beta <- NULL
+for(l in 1: n.chains){
+  beta <- rbind(beta,samples2[[l]])
+}
+
+inc_prob <- apply(beta!=0,2,mean)
+q <- t(apply(beta,2,quantile,c(0.5,0.05,0.95)))
+out <- cbind(inc_prob,q)
+kable(round(out,2))
+```
+Karena inc_prob untuk setiap beta sudah 1, maka tidak perlu melakukan features selections.
+  
+===========
+| MODEL 2 |
+===========
+```{r}
+# Model 2: Update the model_string to modify priors and parameters
+model_string_2 <- textConnection("model {
+  # Likelihood
+  for(i in 1:n) {
+    Y[i] ~ dnorm(alpha + mu[i], tau)
+    mu[i] <- inprod(X[i,], beta[]) 
+  }
+  
+  # Priors 
+  for(j in 1:p) {
+    beta[j] ~ dnorm(0, 0.01)  # Updated prior
+  }
+  
+  alpha ~ dnorm(0, 0.01)    # Updated prior
+  tau ~ dgamma(0.5, 0.5)     # Updated prior
+  
+}")
+
+# Compile and run Model 2
+model_2 <- jags.model(model_string_2, data = data, n.chains = n.chains, quiet = TRUE)
+update(model_2, burn)
+samples_2 <- coda.samples(model_2, variable.names = params, n.iter = n.iter)
+
+# Summary of Model 2
+summary(samples_2)
+```
+
+#Graphical Convergence Diagnostics
+```{r}
+plot(samples_2)
+```
+
+#Numerical Convergence Diagnostics: Gelman-Rubin Statistics
+```{r}
+gelman.diag(samples_2)
+```
+PSRF = 1, means that it's perfect and indicates convergence
+
+#Effective Sample Size (ESS)
+```{r}
+effectiveSize(samples_2)
+```
+
+#Deviance Information Criteria (DIC)
+```{r}
+DIC1 <- dic.samples(model_2,n.iter=n.iter,progress.bar="none")
+DIC1
+```
+
+#Posterior Predictive Checks USING MODEL 1
+```{r}
+model_string <- textConnection("model
+{
+  # Likelihood
+  for(i in 1:n)
+  {
+    Y[i] ~ dnorm(alpha+inprod(X[i,],beta[]),tau)
+  }
+  
+  # Priors
+  for(j in 1:p)
+  {
+    beta[j] ~ dnorm(0,0.001)
+  }
+  
+  alpha ~ dnorm(0,0.001)
+  tau ~ dgamma(0.1, 0.1)
+  
+  #Posterior predictive checks
+  for(i in 1:n){
+    Y2[i] ~ dnorm(alpha+inprod(X[i,],beta[]),tau)
+  }
+  D[1] <- min(Y2[])
+  D[2] <- max(Y2[])
+  D[3] <- max(Y2[])-min(Y2[])
+}")
+```
+
+```{r}
+model <- jags.model(model_string, data = data, n.chains = n.chains, quiet = TRUE)
+update(model, burn)
+samples <- coda.samples(model, variable.names=c("D", "beta"), n.iter=n.iter)
+```
+
+```{r}
+summary(samples)
+```
+
+```{r}
+D1 <- samples[[1]]
+D2 <- samples[[2]]
+
+#Compute the test stats for the data
+D0 <- c(min(Y),max(Y),max(Y)-min(Y))
+Dnames <- c("Min Y","Max Y","Range Y")
+
+#Compute the test stats for the model
+pval <- rep(0,3)
+names(pval) <- Dnames
+```
+
+```{r}
+for (j in 1:3) {
+  plot(density(D1[, j]), xlim = range(c(D0[j], D1[, j], D2[, j])), xlab = "D",
+       ylab = "Posterior probability", main = Dnames[j], col = "blue", lty = 1)
+  lines(density(D2[, j]), col = "red", lty = 1)
+  abline(v = D0[j], col = "green", lty = 1)
+  legend("topleft", c("Data", "Chain 1", "Chain 2"), lty = c(1, 1, 1, 1),
+         col = c("green", "blue", "red"), bty = "n")
+  
+  pval[j] <- mean(D1[, j] > D0[j])
+}
+```
+
+#Results
+```{r}
+pval
+```
